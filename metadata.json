@@ -1,0 +1,6 @@
+{
+  "name": "AI Chat",
+  "description": "تطبيق ذكاء اصطناعي متكامل بتصميم احترافي داكن ودعم كامل للمحادثات، الجلسات، تحليل الملفات، والإدخال الصوتي.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
