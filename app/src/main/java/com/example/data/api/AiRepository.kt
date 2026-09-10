@@ -11,7 +11,16 @@ class AiRepository(
 
     suspend fun sendMessage(userId: String, message: String): Result<String> = withContext(Dispatchers.IO) {
         try {
-            val response = apiService.sendChatMessage(ChatApiRequest(user_id = userId, message = message))
+            val jsonPayload = JSONObject().apply {
+                put("message", message)
+                if (userId.isNotBlank()) {
+                    put("session_id", userId)
+                }
+            }.toString()
+
+            val requestBody = AiApiClient.createJsonRequestBody(jsonPayload)
+            val response = apiService.sendChatMessage(requestBody)
+
             if (response.isSuccessful) {
                 val rawBody = response.body()?.string() ?: ""
                 val parsed = extractAnswerText(rawBody)
@@ -22,30 +31,37 @@ class AiRepository(
                 Result.failure(Exception(extractedErr))
             }
         } catch (e: Exception) {
-            // As per requirement: "وفي حالة توقف API: اعرض للمستخدم: 'AI service is temporarily unavailable'"
+            // Attempt fallback to GET /ask/text
+            try {
+                val fallback = apiService.askText(question = message, sessionId = userId.ifBlank { null })
+                if (fallback.isSuccessful) {
+                    val rawFallback = fallback.body()?.string() ?: ""
+                    val parsedFallback = extractAnswerText(rawFallback)
+                    if (parsedFallback.isNotEmpty()) {
+                        return@withContext Result.success(parsedFallback)
+                    }
+                }
+            } catch (_: Exception) {
+                // Ignore fallback error and report main error
+            }
+
             Result.failure(Exception("AI service is temporarily unavailable: ${e.localizedMessage ?: "Connection error"}"))
         }
     }
 
     suspend fun createSession(userId: String): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val response = apiService.createSession(UserIdRequest(user_id = userId))
-            if (response.isSuccessful) {
-                val raw = response.body()?.string() ?: "Session initialized"
-                Result.success(extractAnswerText(raw))
-            } else {
-                Result.failure(Exception("Failed to create session: ${response.code()}"))
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+        resetMemory(userId)
     }
 
     suspend fun resetMemory(userId: String): Result<String> = withContext(Dispatchers.IO) {
         try {
-            val response = apiService.resetMemory(UserIdRequest(user_id = userId))
+            val jsonPayload = JSONObject().apply {
+                put("session_id", userId)
+            }.toString()
+            val requestBody = AiApiClient.createJsonRequestBody(jsonPayload)
+            val response = apiService.clearSession(requestBody)
             if (response.isSuccessful) {
-                val raw = response.body()?.string() ?: "Memory reset successfully"
+                val raw = response.body()?.string() ?: "Session cleared"
                 Result.success(extractAnswerText(raw))
             } else {
                 Result.failure(Exception("Failed to reset memory: ${response.code()}"))
@@ -56,17 +72,7 @@ class AiRepository(
     }
 
     suspend fun deleteSession(userId: String): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val response = apiService.deleteSession(userId)
-            if (response.isSuccessful) {
-                val raw = response.body()?.string() ?: "Session deleted"
-                Result.success(extractAnswerText(raw))
-            } else {
-                Result.failure(Exception("Failed to delete session: ${response.code()}"))
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+        resetMemory(userId)
     }
 
     suspend fun checkHealth(): Result<Boolean> = withContext(Dispatchers.IO) {
@@ -79,36 +85,20 @@ class AiRepository(
     }
 
     suspend fun getVersion(): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val response = apiService.getVersion()
-            if (response.isSuccessful) {
-                Result.success(response.body()?.string() ?: "1.0.0")
-            } else {
-                Result.failure(Exception("Status ${response.code()}"))
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+        Result.success("1.0.0")
     }
 
     suspend fun getApiInfo(): Result<String> = withContext(Dispatchers.IO) {
-        try {
-            val response = apiService.getApiInfo()
-            if (response.isSuccessful) {
-                Result.success(response.body()?.string() ?: "AI Chat API v1")
-            } else {
-                Result.failure(Exception("Status ${response.code()}"))
-            }
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
+        Result.success("WormGPT API v1.0")
     }
 
     private fun extractAnswerText(raw: String): String {
         val trimmed = raw.trim()
         if (trimmed.isEmpty()) return ""
 
-        // If it starts with JSON syntax, try parsing
+        var extracted = trimmed
+
+        // Check if JSON response
         if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
             try {
                 val jsonTokener = JSONTokener(trimmed)
@@ -121,20 +111,40 @@ class AiRepository(
                     for (key in candidateKeys) {
                         if (nextValue.has(key)) {
                             val candidate = nextValue.optString(key)
-                            if (candidate.isNotEmpty()) return candidate
+                            if (candidate.isNotEmpty()) {
+                                extracted = candidate
+                                break
+                            }
                         }
                     }
                 }
             } catch (_: Exception) {
-                // Return trimmed raw string
+                // Keep raw
             }
         }
 
-        // If JSON has escaped quotes or plain string
-        if (trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length >= 2) {
-            return trimmed.substring(1, trimmed.length - 1).replace("\\n", "\n").replace("\\\"", "\"")
+        // If the extracted text has an inner embedded JSON, e.g.
+        // "❌ خطأ 429: {"error":"Free limit reached","message":"You have used all 10 free chats today. Create a free account to continue."}"
+        val innerJsonStart = extracted.indexOf('{')
+        val innerJsonEnd = extracted.lastIndexOf('}')
+        if (innerJsonStart != -1 && innerJsonEnd > innerJsonStart) {
+            try {
+                val innerJsonStr = extracted.substring(innerJsonStart, innerJsonEnd + 1)
+                val innerObj = JSONObject(innerJsonStr)
+                val innerMsg = innerObj.optString("message").ifEmpty { innerObj.optString("error") }
+                if (innerMsg.isNotEmpty()) {
+                    val prefix = extracted.substring(0, innerJsonStart).trim()
+                    return if (prefix.isNotEmpty()) "$prefix $innerMsg" else innerMsg
+                }
+            } catch (_: Exception) {
+                // Keep extracted
+            }
         }
 
-        return trimmed
+        if (extracted.startsWith("\"") && extracted.endsWith("\"") && extracted.length >= 2) {
+            return extracted.substring(1, extracted.length - 1).replace("\\n", "\n").replace("\\\"", "\"")
+        }
+
+        return extracted
     }
 }

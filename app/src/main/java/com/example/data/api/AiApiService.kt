@@ -1,74 +1,59 @@
 package com.example.data.api
 
+import com.squareup.moshi.Moshi
+import com.squareup.moshi.kotlin.reflect.KotlinJsonAdapterFactory
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.ResponseBody
 import okhttp3.logging.HttpLoggingInterceptor
 import retrofit2.Response
 import retrofit2.Retrofit
+import retrofit2.converter.moshi.MoshiConverterFactory
 import retrofit2.http.Body
-import retrofit2.http.DELETE
-import retrofit2.http.Field
-import retrofit2.http.FormUrlEncoded
 import retrofit2.http.GET
 import retrofit2.http.Headers
 import retrofit2.http.POST
-import retrofit2.http.Path
 import retrofit2.http.Query
 import java.util.concurrent.TimeUnit
-
-data class ChatApiRequest(
-    val user_id: String,
-    val message: String
-)
-
-data class UserIdRequest(
-    val user_id: String
-)
 
 interface AiApiService {
     @Headers("Content-Type: application/json")
     @POST("chat")
-    suspend fun sendChatMessage(@Body request: ChatApiRequest): Response<ResponseBody>
+    suspend fun sendChatMessage(@Body body: RequestBody): Response<ResponseBody>
 
-    @FormUrlEncoded
-    @POST("chat/form")
-    suspend fun sendChatForm(
-        @Field("user_id") userId: String,
-        @Field("message") message: String
+    @Headers("Content-Type: application/json")
+    @POST("clear")
+    suspend fun clearSession(@Body body: RequestBody): Response<ResponseBody>
+
+    @GET("ask/text")
+    suspend fun askText(
+        @Query("question") question: String,
+        @Query("session_id") sessionId: String? = null
     ): Response<ResponseBody>
 
     @GET("ask")
-    suspend fun askQuestion(@Query("question") question: String): Response<ResponseBody>
-
-    @GET("ask/text")
-    suspend fun askQuestionText(@Query("question") question: String): Response<ResponseBody>
-
-    @Headers("Content-Type: application/json")
-    @POST("session")
-    suspend fun createSession(@Body request: UserIdRequest): Response<ResponseBody>
-
-    @Headers("Content-Type: application/json")
-    @POST("reset")
-    suspend fun resetMemory(@Body request: UserIdRequest): Response<ResponseBody>
-
-    @GET("session/{user_id}")
-    suspend fun getSession(@Path("user_id") userId: String): Response<ResponseBody>
-
-    @DELETE("session/{user_id}")
-    suspend fun deleteSession(@Path("user_id") userId: String): Response<ResponseBody>
+    suspend fun ask(
+        @Query("q") question: String,
+        @Query("session_id") sessionId: String? = null
+    ): Response<ResponseBody>
 
     @GET("health")
     suspend fun getHealth(): Response<ResponseBody>
 
-    @GET("version")
-    suspend fun getVersion(): Response<ResponseBody>
-
-    @GET("api")
-    suspend fun getApiInfo(): Response<ResponseBody>
+    @GET("sessions")
+    suspend fun getSessions(): Response<ResponseBody>
 }
 
 object AiApiClient {
     private const val BASE_URL = "http://51.75.118.171:20085/"
+
+    private val moshi: Moshi by lazy {
+        Moshi.Builder()
+            .addLast(KotlinJsonAdapterFactory())
+            .build()
+    }
 
     private val okHttpClient: OkHttpClient by lazy {
         val logging = HttpLoggingInterceptor().apply {
@@ -87,7 +72,12 @@ object AiApiClient {
         Retrofit.Builder()
             .baseUrl(BASE_URL)
             .client(okHttpClient)
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
             .build()
             .create(AiApiService::class.java)
+    }
+
+    fun createJsonRequestBody(jsonString: String): RequestBody {
+        return jsonString.toRequestBody("application/json; charset=utf-8".toMediaType())
     }
 }
